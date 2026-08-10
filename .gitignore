@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+gastos.db
+test_gastos.db
+venv/
+.pytest_cache/
+*.csv
