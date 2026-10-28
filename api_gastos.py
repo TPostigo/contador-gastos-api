@@ -6,8 +6,11 @@ from enum import Enum
 import pandas as pd
 import numpy as np
 import jwt
+import urllib.error
+import uuid
 import db
 import seguridad
+import asistente
 
 # ============================================
 # Configuración de la aplicación
@@ -28,6 +31,77 @@ app.add_middleware(
 
 # Crear las tablas al arrancar la API
 db.crear_tablas()
+
+# ============================================
+# Cuenta de demostración
+# ============================================
+
+EMAIL_DEMO = "demo@demo.com"
+PASSWORD_DEMO = "demo1234"
+SALDO_DEMO = 2000.0
+
+# (descripción, importe, categoría, fecha) — tres meses de ejemplo
+GASTOS_DEMO = [
+    ("Supermercado", 62.40, "comida", "2026-08-03"),
+    ("Gasolina", 48.10, "transporte", "2026-08-05"),
+    ("Cine", 14.50, "ocio", "2026-08-09"),
+    ("Restaurante", 36.80, "comida", "2026-08-12"),
+    ("Abono transporte", 54.00, "transporte", "2026-08-01"),
+    ("Luz", 58.20, "casa", "2026-08-15"),
+    ("Internet", 39.90, "casa", "2026-08-16"),
+    ("Farmacia", 12.35, "otros", "2026-08-20"),
+    ("Concierto", 45.00, "ocio", "2026-08-22"),
+    ("Supermercado", 71.25, "comida", "2026-09-02"),
+    ("Abono transporte", 54.00, "transporte", "2026-09-01"),
+    ("Taxi", 18.60, "transporte", "2026-09-07"),
+    ("Cena de cumpleaños", 58.90, "comida", "2026-09-13"),
+    ("Librería", 27.40, "otros", "2026-09-14"),
+    ("Luz", 61.75, "casa", "2026-09-15"),
+    ("Internet", 39.90, "casa", "2026-09-16"),
+    ("Gimnasio", 35.00, "ocio", "2026-09-18"),
+    ("Gasolina", 52.30, "transporte", "2026-09-21"),
+    ("Supermercado", 66.80, "comida", "2026-10-04"),
+    ("Abono transporte", 54.00, "transporte", "2026-10-01"),
+    ("Ropa", 89.95, "otros", "2026-10-11"),
+    ("Cafetería", 6.80, "comida", "2026-10-17"),
+    ("Escapada fin de semana", 120.00, "ocio", "2026-10-19"),
+]
+
+def preparar_demo() -> None:
+    """Deja la cuenta de demostración en su estado de ejemplo.
+
+    Se ejecuta al arrancar la API: crea la cuenta si no existe y restablece
+    su contraseña, su saldo y sus gastos, así que los cambios de los datos
+    de ejemplo llegan también a bases de datos antiguas.
+    """
+    con = db.conectar()
+    existe = con.execute(
+        "SELECT id FROM usuarios WHERE email = ?", (EMAIL_DEMO,)
+    ).fetchone()
+    hash_demo = seguridad.hashear_password(PASSWORD_DEMO)
+    if existe:
+        usuario_id = existe["id"]
+        con.execute(
+            "UPDATE usuarios SET password = ?, saldo_inicial = ? WHERE id = ?",
+            (hash_demo, SALDO_DEMO, usuario_id),
+        )
+        con.execute("DELETE FROM gastos WHERE usuario_id = ?", (usuario_id,))
+    else:
+        cursor = con.execute(
+            "INSERT INTO usuarios (email, password, saldo_inicial) VALUES (?, ?, ?)",
+            (EMAIL_DEMO, hash_demo, SALDO_DEMO),
+        )
+        usuario_id = cursor.lastrowid
+    for descripcion, importe, categoria, fecha in GASTOS_DEMO:
+        con.execute(
+            "INSERT INTO gastos (id, usuario_id, descripcion, importe, categoria, fecha) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), usuario_id, descripcion, importe, categoria, fecha),
+        )
+    con.commit()
+    con.close()
+
+preparar_demo()
 
 # ============================================
 # Modelos de datos (Pydantic)
@@ -184,6 +258,25 @@ def borrar_gasto(gasto_id: str, usuario_id: int = Depends(usuario_actual)):
     con.close()
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="Gasto no encontrado")
+
+# ============================================
+# Endpoint del asistente de IA (protegido)
+# ============================================
+
+class DatosPregunta(BaseModel):
+    pregunta: str = Field(min_length=3, max_length=500)
+
+@app.post("/asistente")
+def preguntar_asistente(datos: DatosPregunta, usuario_id: int = Depends(usuario_actual)):
+    try:
+        respuesta = asistente.responder(usuario_id, datos.pregunta)
+    except RuntimeError as error:
+        # Falta la clave de Groq en la configuración
+        raise HTTPException(status_code=503, detail=str(error))
+    except (urllib.error.URLError, KeyError, ValueError):
+        # Groq no responde o devuelve algo inesperado
+        raise HTTPException(status_code=502, detail="El asistente no está disponible ahora")
+    return {"respuesta": respuesta}
 
 # ============================================
 # Endpoint de análisis (pandas)
